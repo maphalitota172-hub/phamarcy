@@ -51,7 +51,7 @@ Copy-Item frontend\.env.example frontend\.env
 
 ## Deployment (Vercel + Render)
 
-The frontend is deployed from `frontend/` on Vercel; the API is deployed from `backend/` on Render. The root `render.yaml` is a Render Blueprint for the API, and `frontend/vercel.json` configures client-side route fallback.
+The frontend is deployed from `frontend/` on Vercel; the API is deployed from `backend/` on Render. The root `render.yaml` is a Render Blueprint for the API on Render's free compute plan, and `frontend/vercel.json` configures client-side route fallback. Free Render services spin down after 15 minutes without traffic, so the first request after inactivity can take about a minute; this plan is intended for prototypes, not production.
 
 1. Create a MongoDB Atlas database and database user. Allow connections from the Render service's outbound IP addresses in Atlas Network Access.
 2. In Render, create a Blueprint from this repository and use `render.yaml`. Set `MONGODB_URI` to the Atlas connection string and keep the generated `JWT_SECRET` private. `MONGODB_DATABASE` is preconfigured by the Blueprint.
