@@ -28,13 +28,19 @@ function env(...keys) {
 const providerConfig = {
   "M-Pesa": {
     operator: "Vodacom Lesotho M-Pesa",
+    country: "LES",
     currency: "LSL",
     countryCode: "266",
-    baseUrl: env("MPESA_BASE_URL"),
+    // Vodacom M-Pesa OpenAPI (business.m-pesa.com). Lesotho market context is vodacomLES.
+    // "sandbox" tests against the shared test environment; "openapi" is production
+    // and is the environment that pushes a real prompt to a customer handset.
+    environment: env("MPESA_ENVIRONMENT") || "sandbox",
+    market: env("MPESA_MARKET") || "vodacomLES",
+    baseUrl: (env("MPESA_BASE_URL") || "https://openapi.m-pesa.com").replace(/\/+$/, ""),
     apiKey: env("MPESA_API_KEY"),
     publicKey: env("MPESA_PUBLIC_KEY"),
-    serviceProviderCode: env("MPESA_SERVICE_PROVIDER_CODE", "MPESA_SHORTCODE"),
-    required: ["baseUrl", "apiKey", "serviceProviderCode"]
+    serviceProviderCode: env("MPESA_SERVICE_PROVIDER_CODE", "MPESA_SHORTCODE") || "95899",
+    required: ["apiKey", "publicKey"]
   },
   "EcoCash": {
     operator: "Econet Lesotho EcoCash",
@@ -62,13 +68,15 @@ export function listMobileMoneyProviders() {
   return MOBILE_MONEY_METHODS.map(name => {
     const config = providerConfig[name];
     const live = isConfigured(config);
+    const environment = config.environment || null;
     return {
       name,
       operator: config.operator,
       currency: config.currency,
       mode: live ? "live" : "sandbox",
+      environment,
       message: live
-        ? "Merchant credentials detected — prompts are sent through the live provider API."
+        ? `Merchant credentials detected — prompts are sent through the live ${config.operator} API (${environment} environment).`
         : "No merchant credentials configured — prompts are simulated in sandbox mode."
     };
   });
@@ -103,44 +111,53 @@ function toPublicKeyPem(value) {
   return `-----BEGIN PUBLIC KEY-----\n${wrapped}\n-----END PUBLIC KEY-----`;
 }
 
-function encryptApiKey(apiKey, publicKey) {
+function rsaEncrypt(value, publicKey) {
   const encrypted = crypto.publicEncrypt(
     { key: toPublicKeyPem(publicKey), padding: crypto.constants.RSA_PKCS1_PADDING },
-    Buffer.from(apiKey, "utf8")
+    Buffer.from(value, "utf8")
   );
   return encrypted.toString("base64");
 }
 
-async function mpesaPublicKey(config) {
-  if (config.publicKey) return config.publicKey;
-  const response = await fetch(`${config.baseUrl}/publicKey/v2/publickey`, { method: "GET" });
-  const body = await readJsonResponse(response);
-  const key = body.output_publicKey || body.publicKey;
-  if (!response.ok || !key) {
-    throw new Error(body.output_ResponseDesc || `Could not load the M-Pesa public key (HTTP ${response.status})`);
-  }
-  return key;
+function mpesaPath(config, suffix) {
+  return `${config.baseUrl}/${config.environment}/ipg/v2/${config.market}/${suffix}`;
 }
 
-// Vodacom M-Pesa OpenAPI "single stage" C2B payment: the customer receives a
-// USSD/STK prompt on their handset. A response code of INS-0 means the prompt
-// was accepted and the transaction is awaiting the customer's PIN.
+// Step 1 of the OpenAPI handshake: the RSA-encrypted API key is exchanged for a
+// short-lived session id. The same session id is then re-encrypted and used as
+// the bearer token on the actual transaction call.
+async function mpesaSessionId(config) {
+  const bearer = rsaEncrypt(config.apiKey, config.publicKey);
+  const response = await fetch(mpesaPath(config, "getSession/"), {
+    method: "GET",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${bearer}`, Origin: "*" }
+  });
+  const body = await readJsonResponse(response);
+  const sessionId = body.output_SessionID;
+  if (!response.ok || !sessionId) {
+    throw new Error(body.output_ResponseDesc || body.output_error || `Could not open an M-Pesa session (HTTP ${response.status})`);
+  }
+  return sessionId;
+}
+
+// Step 2: Vodacom M-Pesa OpenAPI "single stage" C2B payment. This is what pushes
+// the payment prompt onto the customer's handset. A response code of INS-0 means
+// the prompt was accepted and the transaction is awaiting the customer's PIN.
 async function requestMpesaPrompt(config, { msisdn, amountMinor, reference, description }) {
-  const publicKey = await mpesaPublicKey(config);
-  const bearer = encryptApiKey(config.apiKey, publicKey);
-  const response = await fetch(`${config.baseUrl}/ipg/v1x/c2bPayment/singleStage/`, {
+  const sessionId = await mpesaSessionId(config);
+  const bearer = rsaEncrypt(sessionId, config.publicKey);
+  const response = await fetch(mpesaPath(config, "c2bPayment/singleStage/"), {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${bearer}`,
-      Origin: config.baseUrl
-    },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${bearer}`, Origin: "*" },
     body: JSON.stringify({
-      input_TransactionReference: reference,
-      input_CustomerMSISDN: msisdn,
       input_Amount: amountToMajor(amountMinor),
-      input_ThirdPartyReference: reference,
-      input_ServiceProviderCode: config.serviceProviderCode
+      input_Country: config.country,
+      input_Currency: config.currency,
+      input_CustomerMSISDN: msisdn,
+      input_ServiceProviderCode: config.serviceProviderCode,
+      input_ThirdPartyConversationID: reference,
+      input_TransactionReference: reference,
+      input_PurchasedItemsDesc: description || "Pharmacy purchase"
     })
   });
   const body = await readJsonResponse(response);
@@ -149,9 +166,46 @@ async function requestMpesaPrompt(config, { msisdn, amountMinor, reference, desc
   return {
     providerRef: body.output_TransactionID || body.output_ConversationID || reference,
     status: accepted ? "pending" : "failed",
-    message: body.output_ResponseDesc || (accepted ? "M-Pesa prompt accepted." : `M-Pesa returned code ${code || response.status}`),
-    description
+    message: body.output_ResponseDesc || body.output_error || (accepted
+      ? `M-Pesa prompt for ${config.currency} ${amountToMajor(amountMinor)} sent to ${msisdn}. The customer must approve it on their phone.`
+      : `M-Pesa returned code ${code || response.status}`)
   };
+}
+
+async function queryMpesaStatus(config, record) {
+  const sessionId = await mpesaSessionId(config);
+  const bearer = rsaEncrypt(sessionId, config.publicKey);
+  const query = new URLSearchParams({
+    input_QueryReference: record.providerRef,
+    input_ServiceProviderCode: config.serviceProviderCode,
+    input_ThirdPartyConversationID: record.reference,
+    input_Country: config.country
+  });
+  const response = await fetch(`${mpesaPath(config, "queryTransactionStatus/")}?${query}`, {
+    method: "GET",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${bearer}`, Origin: "*" }
+  });
+  const body = await readJsonResponse(response);
+  const status = String(body.output_ResponseTransactionStatus || body.output_TransactionStatus || "").toUpperCase();
+  if (status === "COMPLETED" || status === "SUCCESS") {
+    return paymentRequests.updateById(record.id, {
+      status: "confirmed",
+      message: body.output_ResponseDesc || "M-Pesa confirmed the payment.",
+      updatedAt: new Date().toISOString()
+    });
+  }
+  if (status === "FAILED") {
+    return paymentRequests.updateById(record.id, {
+      status: "failed",
+      message: body.output_ResponseDesc || "The customer rejected or the M-Pesa payment failed.",
+      failureReason: body.output_ResponseDesc || "M-Pesa reported a failure",
+      updatedAt: new Date().toISOString()
+    });
+  }
+  return paymentRequests.updateById(record.id, {
+    message: body.output_ResponseDesc || "Still awaiting the customer's approval on their phone.",
+    updatedAt: new Date().toISOString()
+  });
 }
 
 // Econet EcoCash charges the customer's wallet and pushes a USSD approval
@@ -290,20 +344,9 @@ export async function linkPaymentRequestToSale(id, saleId) {
 export async function refreshPaymentRequest(id) {
   const record = await getPaymentRequest(id);
   if (record.mode !== "live" || record.status !== "pending") return record;
-  const config = providerConfig[record.provider];
   try {
-    const response = await fetch(
-      `${config.baseUrl}/ipg/v1x/queryTransactionStatus/?input_QueryReference=${encodeURIComponent(record.providerRef)}&input_ServiceProviderCode=${encodeURIComponent(config.serviceProviderCode)}&input_ThirdPartyReference=${encodeURIComponent(record.reference)}`,
-      { method: "GET", headers: { Authorization: `Bearer ${config.apiKey}` } }
-    );
-    const body = await readJsonResponse(response);
-    const code = String(body.output_ResponseCode || "");
-    if (!code || code.startsWith("INS-")) return record;
-    return paymentRequests.updateById(id, {
-      status: "confirmed",
-      message: body.output_ResponseDesc || "The provider reported the payment as completed.",
-      updatedAt: new Date().toISOString()
-    });
+    if (record.provider === "M-Pesa") return await queryMpesaStatus(providerConfig["M-Pesa"], record);
+    return record;
   } catch (error) {
     return paymentRequests.updateById(id, {
       message: `Status check failed: ${error.message}`,
