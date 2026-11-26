@@ -1,4 +1,5 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
+// Trailing slashes are stripped so the base URL can never produce "//auth/login".
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/+$/, "");
 
 export async function apiRequest(path, options = {}) {
   return request(path, options, localStorage.getItem("fis_token"));
