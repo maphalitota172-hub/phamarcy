@@ -8,6 +8,7 @@ import customerRoutes from "./routes/customers.js";
 import salesRoutes from "./routes/sales.js";
 import customerAuthRoutes from "./routes/customerAuth.js";
 import customerPortalRoutes from "./routes/customerPortal.js";
+import mobileMoneyRoutes from "./routes/mobileMoney.js";
 import { STORAGE_PROVIDER } from "./config/storage.js";
 import { connectDatabase, isDatabaseConnected } from "./config/database.js";
 import { getJwtSecret } from "./config/jwt.js";
@@ -57,6 +58,7 @@ app.use("/api/customer-auth", customerAuthRoutes);
 app.use("/api/customer-portal", customerPortalRoutes);
 app.use("/api/customers", customerRoutes);
 app.use("/api/sales", salesRoutes);
+app.use("/api/mobile-money", mobileMoneyRoutes);
 app.use("/api", apiRoutes);
 
 app.use((req, res) => res.status(404).json({ error: "API endpoint not found" }));

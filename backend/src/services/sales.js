@@ -68,7 +68,9 @@ export async function createSale({ items, customerId: requestedCustomerId, tende
       if (!acceptedMethods.has(method) || !Number.isSafeInteger(amountMinor) || amountMinor <= 0) {
         throw Object.assign(new Error("Payments require a supported method and positive amount in minor units"), { status: 400 });
       }
-      return { method, amountMinor };
+      return payment.reference
+        ? { method, amountMinor, reference: String(payment.reference) }
+        : { method, amountMinor };
     });
     if (normalizedPayments.reduce((sum, payment) => sum + payment.amountMinor, 0) !== totalMinor) {
       throw Object.assign(new Error("Payment total must exactly match the sale total"), { status: 400 });

@@ -108,6 +108,28 @@ export const Payment = createNumericModel("FisPayment", "payments", {
   { fields: { saleId: 1 }, options: {} }
 ]);
 
+export const PaymentRequest = createNumericModel("FisPaymentRequest", "paymentRequests", {
+  provider: { type: String, enum: ["M-Pesa", "EcoCash"], required: true },
+  phone: { type: String, required: true },
+  amountMinor: { type: Number, required: true, min: 1 },
+  currency: { type: String, default: "LSL" },
+  reference: { type: String },
+  description: { type: String, default: "" },
+  status: { type: String, enum: ["pending", "confirmed", "failed", "cancelled"], default: "pending" },
+  mode: { type: String, enum: ["live", "sandbox"], default: "sandbox" },
+  providerRef: { type: String },
+  saleId: { type: Number, default: null },
+  initiatedBy: { type: Number, default: null },
+  initiatedByType: { type: String, default: null },
+  message: { type: String, default: "" },
+  failureReason: { type: String, default: null },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+}, [
+  { fields: { providerRef: 1 }, options: { unique: true, partialFilterExpression: { providerRef: { $type: "string" } } } },
+  { fields: { status: 1 }, options: {} }
+]);
+
 export const Expense = createNumericModel("FisExpense", "expenses", {
   date: { type: String, required: true },
   category: { type: String, required: true },

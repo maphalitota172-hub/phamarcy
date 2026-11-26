@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import {
-  AuditLog, Budget, Customer, CustomerCredential, Expense, Income, Payment, Product,
+  AuditLog, Budget, Customer, CustomerCredential, Expense, Income, Payment, PaymentRequest, Product,
   Sale, Settings, StockMovement, Supplier, SupplierInvoice, SupplierPayment, User
 } from "../models/index.js";
 import { mongoose } from "../config/database.js";
@@ -12,6 +12,7 @@ const modelByFile = {
   "products.json": Product,
   "sales.json": Sale,
   "payments.json": Payment,
+  "paymentRequests.json": PaymentRequest,
   "expenses.json": Expense,
   "income.json": Income,
   "suppliers.json": Supplier,

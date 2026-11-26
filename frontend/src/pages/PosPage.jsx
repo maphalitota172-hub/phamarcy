@@ -5,6 +5,17 @@ import { apiRequest } from "../services/api.js";
 import { formatMoney } from "./Dashboard.jsx";
 
 const cashierRoles = ["System Administrator", "Finance Manager", "Cashier"];
+const mobileMoneyMethods = ["M-Pesa", "EcoCash"];
+
+function isMobileMoney(method) {
+  return mobileMoneyMethods.includes(method);
+}
+
+function paymentRequestStatus(request) {
+  if (request.status === "confirmed") return "green";
+  if (request.status === "pending") return "amber";
+  return "red";
+}
 
 function saleTotalMinor(sale) {
   if (sale.totalMinor !== null && sale.totalMinor !== undefined &&
@@ -29,7 +40,8 @@ export default function PosPage() {
   const [productSearch, setProductSearch] = useState("");
   const [customerSearch, setCustomerSearch] = useState("");
   const [customerId, setCustomerId] = useState("");
-  const [paymentLines, setPaymentLines] = useState([{ method: "Cash", amountMinor: null }]);
+  const [paymentLines, setPaymentLines] = useState([{ method: "Cash", amountMinor: null, phone: "", request: null }]);
+  const [providers, setProviders] = useState([]);
   const [lastReceipt, setLastReceipt] = useState(null);
   const [showCustomerForm, setShowCustomerForm] = useState(false);
   const [newCustomer, setNewCustomer] = useState({ name: "", phone: "", email: "", address: "" });
@@ -38,12 +50,13 @@ export default function PosPage() {
   const [loading, setLoading] = useState(false);
 
   async function loadPosData() {
-    const [productResult, customerResult, salesResult] = await Promise.all([
-      apiRequest("/products"), apiRequest("/customers"), apiRequest("/sales")
+    const [productResult, customerResult, salesResult, providerResult] = await Promise.all([
+      apiRequest("/products"), apiRequest("/customers"), apiRequest("/sales"), apiRequest("/mobile-money/providers")
     ]);
     setProducts(productResult.data || []);
     setCustomers((customerResult.data || []).filter(customer => customer.active && !customer.isWalkIn));
     setSales([...(salesResult.data || [])].reverse());
+    setProviders(providerResult.data || []);
   }
 
   useEffect(() => {
@@ -70,6 +83,9 @@ export default function PosPage() {
   const totalMinor = cart.reduce((total, item) => total + item.product.priceMinor * item.quantity, 0);
   const paymentsTotalMinor = paymentLines.reduce((total, payment) =>
     total + (payment.amountMinor === null ? totalMinor : payment.amountMinor), 0);
+  const pendingMobileMoney = paymentLines.filter(line => isMobileMoney(line.method) && line.request?.status !== "confirmed");
+  const mobileMoneyReady = pendingMobileMoney.length === 0;
+  const sandboxProviders = providers.filter(provider => provider.mode === "sandbox");
 
   function addProduct(product) {
     setCart(current => {
@@ -102,6 +118,60 @@ export default function PosPage() {
     } catch (caught) { setError(caught.message); }
   }
 
+  function updatePaymentLine(index, changes) {
+    setPaymentLines(current => current.map((line, position) => position === index ? { ...line, ...changes } : line));
+  }
+
+  async function sendPrompt(index) {
+    setError("");
+    setNotice("");
+    const line = paymentLines[index];
+    const amountMinor = line.amountMinor === null ? totalMinor : line.amountMinor;
+    if (!line.phone) { setError("Enter the phone number that should receive the payment prompt."); return; }
+    if (!amountMinor) { setError("Add products to the sale before requesting a payment prompt."); return; }
+    try {
+      const result = await apiRequest("/mobile-money/requests", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: line.method,
+          phone: line.phone,
+          amountMinor,
+          description: `POS sale (${line.method})`
+        })
+      });
+      updatePaymentLine(index, { request: result.data });
+      setNotice(result.data.message);
+    } catch (caught) { setError(caught.message); }
+  }
+
+  async function refreshPrompt(index) {
+    setError("");
+    const line = paymentLines[index];
+    try {
+      const result = await apiRequest(`/mobile-money/requests/${line.request.id}/refresh`, { method: "POST" });
+      updatePaymentLine(index, { request: result.data });
+    } catch (caught) { setError(caught.message); }
+  }
+
+  async function confirmPrompt(index) {
+    setError("");
+    const line = paymentLines[index];
+    try {
+      const result = await apiRequest(`/mobile-money/requests/${line.request.id}/confirm`, { method: "POST" });
+      updatePaymentLine(index, { request: result.data });
+      setNotice(result.data.message);
+    } catch (caught) { setError(caught.message); }
+  }
+
+  async function cancelPrompt(index) {
+    setError("");
+    const line = paymentLines[index];
+    try {
+      const result = await apiRequest(`/mobile-money/requests/${line.request.id}/cancel`, { method: "POST" });
+      updatePaymentLine(index, { request: result.data });
+    } catch (caught) { setError(caught.message); }
+  }
+
   async function completeSale() {
     setError("");
     setNotice("");
@@ -114,7 +184,8 @@ export default function PosPage() {
           items: cart.map(item => ({ productId: item.product.id, quantity: item.quantity })),
           payments: paymentLines.map(payment => ({
             method: payment.method,
-            amountMinor: payment.amountMinor === null ? totalMinor : payment.amountMinor
+            amountMinor: payment.amountMinor === null ? totalMinor : payment.amountMinor,
+            ...(payment.request ? { reference: payment.request.providerRef } : {})
           }))
         })
       });
@@ -123,7 +194,7 @@ export default function PosPage() {
       setCart([]);
       setCustomerId("");
       setCustomerSearch("");
-      setPaymentLines([{ method: "Cash", amountMinor: null }]);
+      setPaymentLines([{ method: "Cash", amountMinor: null, phone: "", request: null }]);
       await loadPosData();
     } catch (caught) {
       setError(caught.message);
@@ -154,6 +225,10 @@ export default function PosPage() {
             <input id="pos-customer-search" value={customerSearch} onChange={event => { setCustomerSearch(event.target.value); setCustomerId(""); }} placeholder="Search name, phone or customer ID…" />
             {!!matchingCustomers.length && <div className="suggestions">{matchingCustomers.map(customer => <button type="button" key={customer.id} onClick={() => {
               setCustomerId(String(customer.id)); setCustomerSearch(`${customer.name} (${customer.customerId})`);
+              if (customer.phone) {
+                setPaymentLines(current => current.map(line =>
+                  isMobileMoney(line.method) && !line.phone ? { ...line, phone: customer.phone } : line));
+              }
             }}>{customer.name} · {customer.phone} · {customer.customerId}</button>)}</div>}
             {customerId && <button className="text-button" type="button" onClick={() => { setCustomerId(""); setCustomerSearch(""); }}>Use Walk-in instead</button>}
             {!customerId && <button className="text-button" type="button" onClick={() => { setCustomerSearch("Walk-in"); }}>Walk-in sale</button>}
@@ -183,20 +258,33 @@ export default function PosPage() {
         </table></div>
         <div className="payment-lines">
           <div className="toolbar"><h3>Payment</h3><button type="button" className="btn btn-ghost btn-sm" onClick={() => {
-            setPaymentLines(current => current.map(payment => payment.amountMinor === null ? { ...payment, amountMinor: totalMinor } : payment).concat({ method: "Card", amountMinor: 0 }));
+            setPaymentLines(current => current.map(payment => payment.amountMinor === null ? { ...payment, amountMinor: totalMinor } : payment).concat({ method: "Card", amountMinor: 0, phone: "", request: null }));
           }}>+ Split payment</button></div>
+          {!!sandboxProviders.length && <p className="small">{sandboxProviders.map(provider => provider.name).join(" and ")} are running in sandbox mode — no merchant credentials are configured, so the payment prompt is simulated and can be approved with the button below.</p>}
           {paymentLines.map((payment, index) => <div className="payment-row" key={index}>
-            <div><label htmlFor={`payment-method-${index}`}>Method {index + 1}</label><select id={`payment-method-${index}`} value={payment.method} onChange={event => setPaymentLines(current => current.map((line, position) => position === index ? { ...line, method: event.target.value } : line))}>
+            <div><label htmlFor={`payment-method-${index}`}>Method {index + 1}</label><select id={`payment-method-${index}`} value={payment.method} onChange={event => updatePaymentLine(index, { method: event.target.value, request: null })}>
               <option>Cash</option><option>Credit Card</option><option>E-wallet</option><option>M-Pesa</option><option>EcoCash</option><option>Other</option>
             </select></div>
-            <div><label htmlFor={`payment-amount-${index}`}>Amount (M)</label><input id={`payment-amount-${index}`} type="number" min="0" step="0.01" value={((payment.amountMinor === null ? totalMinor : payment.amountMinor) / 100).toFixed(2)} onChange={event => setPaymentLines(current => current.map((line, position) => position === index ? { ...line, amountMinor: moneyToMinor(event.target.value) } : line))} /></div>
+            <div><label htmlFor={`payment-amount-${index}`}>Amount (M)</label><input id={`payment-amount-${index}`} type="number" min="0" step="0.01" value={((payment.amountMinor === null ? totalMinor : payment.amountMinor) / 100).toFixed(2)} onChange={event => updatePaymentLine(index, { amountMinor: moneyToMinor(event.target.value), request: null })} /></div>
+            {isMobileMoney(payment.method) && <div className="payment-mobile">
+              <label htmlFor={`payment-phone-${index}`}>{payment.method} number</label>
+              <input id={`payment-phone-${index}`} type="tel" placeholder="e.g. 63001234" value={payment.phone || ""} onChange={event => updatePaymentLine(index, { phone: event.target.value, request: null })} />
+              <button type="button" className="btn btn-primary btn-sm" disabled={loading || !payment.phone} onClick={() => sendPrompt(index)}>{payment.request ? "Resend prompt" : "Send payment prompt"}</button>
+              {payment.request && <>
+                <p className="small"><span className={`pill ${paymentRequestStatus(payment.request)}`}>{payment.request.status}</span> {payment.request.message}</p>
+                {payment.request.status === "pending" && payment.request.mode === "sandbox" && <button type="button" className="btn btn-ghost btn-sm" onClick={() => confirmPrompt(index)}>Simulate customer approval</button>}
+                {payment.request.status === "pending" && payment.request.mode === "live" && <button type="button" className="btn btn-ghost btn-sm" onClick={() => refreshPrompt(index)}>Check status</button>}
+                {payment.request.status === "pending" && <button type="button" className="btn btn-ghost btn-sm" onClick={() => cancelPrompt(index)}>Cancel prompt</button>}
+              </>}
+            </div>}
             {paymentLines.length > 1 && <button className="btn btn-ghost btn-sm" onClick={() => setPaymentLines(current => current.filter((_, position) => position !== index))}>Remove</button>}
           </div>)}
           <p className={`small ${paymentsTotalMinor === totalMinor ? "up" : "down"}`}>Payment total: {formatMoney(paymentsTotalMinor / 100)} / {formatMoney(totalMinor / 100)}{paymentsTotalMinor === totalMinor ? " — matches sale total" : " — must match sale total"}</p>
+          {!mobileMoneyReady && <p className="small down">{pendingMobileMoney.length} mobile money prompt(s) must be approved before the sale can be completed.</p>}
         </div>
         <div className="pos-checkout">
           <strong>Total: {formatMoney(totalMinor / 100)}</strong>
-          <button className="btn btn-primary" disabled={loading || !cart.length || paymentsTotalMinor !== totalMinor || !cashierRoles.includes(user?.role)} onClick={completeSale}>{loading ? "Completing…" : "Complete Sale"}</button>
+          <button className="btn btn-primary" disabled={loading || !cart.length || paymentsTotalMinor !== totalMinor || !mobileMoneyReady || !cashierRoles.includes(user?.role)} onClick={completeSale}>{loading ? "Completing…" : "Complete Sale"}</button>
         </div>
       </section>
 

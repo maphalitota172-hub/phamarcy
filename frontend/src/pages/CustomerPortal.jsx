@@ -4,6 +4,13 @@ import { customerApiRequest } from "../services/api.js";
 import { formatMoney } from "./Dashboard.jsx";
 
 const blankForm = { name: "", phone: "", email: "", address: "", password: "" };
+const mobileMoneyMethods = ["M-Pesa", "EcoCash"];
+
+function promptPill(status) {
+  if (status === "confirmed") return "green";
+  if (status === "pending") return "amber";
+  return "red";
+}
 
 export default function CustomerPortal() {
   const [customer, setCustomer] = useState(null);
@@ -11,6 +18,8 @@ export default function CustomerPortal() {
   const [products, setProducts] = useState([]);
   const [cart, setCart] = useState([]);
   const [paymentMethod, setPaymentMethod] = useState("M-Pesa");
+  const [paymentRequest, setPaymentRequest] = useState(null);
+  const [providers, setProviders] = useState([]);
   const [registering, setRegistering] = useState(false);
   const [form, setForm] = useState(blankForm);
   const [error, setError] = useState("");
@@ -18,14 +27,16 @@ export default function CustomerPortal() {
   const [loading, setLoading] = useState(false);
 
   async function loadPortal() {
-    const [profile, history, catalog] = await Promise.all([
+    const [profile, history, catalog, providerList] = await Promise.all([
       customerApiRequest("/customer-portal/me"),
       customerApiRequest("/customer-portal/purchases"),
-      customerApiRequest("/customer-portal/products")
+      customerApiRequest("/customer-portal/products"),
+      customerApiRequest("/customer-portal/mobile-money/providers")
     ]);
     setCustomer(profile.data);
     setPurchases(history.data);
     setProducts(catalog.data);
+    setProviders(providerList.data || []);
   }
 
   useEffect(() => {
@@ -61,6 +72,7 @@ export default function CustomerPortal() {
     setPurchases(null);
     setProducts([]);
     setCart([]);
+    setPaymentRequest(null);
     setForm(blankForm);
   }
 
@@ -88,19 +100,63 @@ export default function CustomerPortal() {
     setCart(current => current.map(item => item.product.id === productId ? { ...item, quantity: parsed } : item));
   }
 
+  const requiresPrompt = mobileMoneyMethods.includes(paymentMethod);
+
+  async function requestPaymentPrompt() {
+    setError("");
+    setNotice("");
+    setLoading(true);
+    try {
+      const result = await customerApiRequest("/customer-portal/mobile-money/requests", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: paymentMethod,
+          amountMinor: totalMinor,
+          description: "Customer portal order"
+        })
+      });
+      setPaymentRequest(result.data);
+      setNotice(result.data.message);
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function approveSandboxPrompt() {
+    setError("");
+    setLoading(true);
+    try {
+      const result = await customerApiRequest(`/customer-portal/mobile-money/requests/${paymentRequest.id}/confirm`, { method: "POST" });
+      setPaymentRequest(result.data);
+      setNotice(result.data.message);
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function checkout() {
     setError("");
     setNotice("");
+    if (requiresPrompt && (!paymentRequest || paymentRequest.status !== "confirmed")) {
+      setError(`Send the ${paymentMethod} prompt and approve it on your phone before you pay.`);
+      return;
+    }
     setLoading(true);
     try {
       const result = await customerApiRequest("/customer-portal/checkout", {
         method: "POST",
         body: JSON.stringify({
           items: cart.map(item => ({ productId: item.product.id, quantity: item.quantity })),
-          paymentMethod
+          paymentMethod,
+          ...(requiresPrompt ? { paymentRequestId: paymentRequest.id } : {})
         })
       });
       setCart([]);
+      setPaymentRequest(null);
       setNotice(`Order #${result.data.id} recorded as paid by ${paymentMethod}.`);
       await loadPortal();
     } catch (caught) {
@@ -158,14 +214,22 @@ export default function CustomerPortal() {
               <div className="customer-checkout">
                 <div>
                   <label htmlFor="customer-payment-method">Payment method</label>
-                  <select id="customer-payment-method" value={paymentMethod} disabled={loading} onChange={event => setPaymentMethod(event.target.value)}>
+                  <select id="customer-payment-method" value={paymentMethod} disabled={loading} onChange={event => { setPaymentMethod(event.target.value); setPaymentRequest(null); }}>
                     <option>M-Pesa</option><option>EcoCash</option><option>E-wallet</option><option>Credit Card</option>
                   </select>
                 </div>
                 <strong>Total: {formatMoney(totalMinor / 100)}</strong>
-                <button className="btn btn-primary" disabled={loading || !cart.length} onClick={checkout}>{loading ? "Processing payment…" : "Pay"}</button>
+                <button className="btn btn-primary" disabled={loading || !cart.length || (requiresPrompt && paymentRequest?.status !== "confirmed")} onClick={checkout}>{loading ? "Processing payment…" : "Pay"}</button>
               </div>
-              <p className="small payment-disclaimer">Prototype checkout: the selected method is recorded as paid in the transaction history; no external payment is charged.</p>
+              {requiresPrompt && <div className="customer-prompt">
+                <p className="small">A {paymentMethod} payment prompt for {formatMoney(totalMinor / 100)} is sent to your registered number {customer.phone || "—"}. Approve it on your phone before paying.</p>
+                <button type="button" className="btn btn-ghost btn-sm" disabled={loading || !cart.length || !customer.phone} onClick={requestPaymentPrompt}>{paymentRequest ? "Resend prompt" : "Send prompt to my phone"}</button>
+                {paymentRequest && <>
+                  <p className="small"><span className={`pill ${promptPill(paymentRequest.status)}`}>{paymentRequest.status}</span> {paymentRequest.message}</p>
+                  {paymentRequest.status === "pending" && paymentRequest.mode === "sandbox" && <button type="button" className="btn btn-ghost btn-sm" disabled={loading} onClick={approveSandboxPrompt}>Simulate approval on phone</button>}
+                </>}
+              </div>}
+              <p className="small payment-disclaimer">{requiresPrompt && providers.find(provider => provider.name === paymentMethod)?.mode === "sandbox" ? `${paymentMethod} is running in sandbox mode: the prompt is simulated because no merchant credentials are configured.` : "Prototype checkout: the selected method is recorded as paid in the transaction history; no external payment is charged."}</p>
             </> : <p className="small">Add pharmacy products to your order to continue.</p>}
           </section>
           <section className="panel table-scroll">
