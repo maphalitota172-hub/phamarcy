@@ -1,0 +1,13 @@
+{
+  "name": "health-city-fis",
+  "private": true,
+  "scripts": {
+    "install:all": "npm install --prefix backend && npm install --prefix frontend",
+    "dev": "concurrently -n backend,frontend -c blue,cyan \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\"",
+    "start": "npm run dev",
+    "build": "npm run build --prefix frontend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
