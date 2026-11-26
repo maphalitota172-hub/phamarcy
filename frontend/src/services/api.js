@@ -1,5 +1,7 @@
-// Trailing slashes are stripped so the base URL can never produce "//auth/login".
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/+$/, "");
+// The backend mounts every route under /api, so normalise the configured base
+// URL: strip trailing slashes (prevents "//auth/login") and guarantee the /api suffix.
+const configuredBase = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/+$/, "");
+const API_BASE_URL = configuredBase.endsWith("/api") ? configuredBase : `${configuredBase}/api`;
 
 export async function apiRequest(path, options = {}) {
   return request(path, options, localStorage.getItem("fis_token"));
